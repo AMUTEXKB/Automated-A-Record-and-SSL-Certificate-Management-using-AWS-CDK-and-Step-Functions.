@@ -1,0 +1,8 @@
+Ec2_A_Record: A_Record
+table_name: Arecord_table_name
+api: EC2API
+Ec2_Api_Record: Api_Record
+api1: EC2API_1
+api_table_name: Api_record_table_name
+domain: jahmaiadewumi.com
+hostedzone: Z09985342FA6P63A9IHS5

@@ -14,9 +14,9 @@ from constructs import Construct
 
 class RaghavStack(Stack):
 
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str,config: dict, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
-
+        self.config = config
         # The code that defines your stack goes here
 
         # Create an IAM Role for the EC2 instance
@@ -24,6 +24,7 @@ class RaghavStack(Stack):
             self,
             "EC2Role",
             assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
+            role_name='ec2Role'
         )
         # Attach an IAM policy to the role that allows the EC2 instance to make HTTP requests
         ec2_role.add_to_policy(
@@ -100,7 +101,7 @@ class RaghavStack(Stack):
                                                            "lambda_code/execute_lambda"),
                                                        timeout=Duration.seconds(10),
                                                        environment={
-                                                            "StateMachine":"Ec2_A_Record"
+                                                            "StateMachine":self.config["Ec2_A_Record"]
                                                        },
                                                        role=db_role,
                                                        tracing=lambda_.Tracing.ACTIVE)
@@ -112,7 +113,7 @@ class RaghavStack(Stack):
                             handler="lambda_function.lambda_handler",
                             code=lambda_.Code.from_asset("lambda_code/dynamodb_lambda"),
                             role=db_role,
-                            environment={"table_name":"Arecord_table_name"},
+                            environment={"table_name":self.config["table_name"]},
                             timeout=Duration.seconds(10),
                             tracing=lambda_.Tracing.ACTIVE,
                         )                                               
@@ -154,7 +155,7 @@ class RaghavStack(Stack):
             "StepFn",
             timeout=Duration.minutes(5),
             tracing_enabled=True,
-            state_machine_name="Ec2_A_Record",
+            state_machine_name=self.config["Ec2_A_Record"],
             state_machine_type=sfn.StateMachineType.STANDARD,
             definition=parallel_state
             )
@@ -163,7 +164,7 @@ class RaghavStack(Stack):
         api = apigw.RestApi(
             self,
             "EC2API",
-            rest_api_name="EC2API"
+            rest_api_name=self.config["api"]
         )
 
         execute_resource = api.root.add_resource("A_Record")
@@ -183,6 +184,107 @@ class RaghavStack(Stack):
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             point_in_time_recovery=True,
-            table_name='Arecord_table_name',
+            table_name=self.config["table_name"],
             removal_policy=RemovalPolicy.DESTROY,
         )        
+
+#CREATE UNIQUE DOMAIN WHEN CUSTOMERS PUBLISH THERE SITE
+    
+        api_execute_sf_lambda= lambda_.Function(self, "apistartstepfunctionlambda",
+                                                       function_name="api_start_stepfunction_lambda",
+                                                       handler="lambda_function.lambda_handler",
+                                                       runtime=lambda_.Runtime.PYTHON_3_9,
+                                                       code=lambda_.Code.from_asset(
+                                                           "lambda_code/api_execute_lambda"),
+                                                       timeout=Duration.seconds(10),
+                                                       environment={
+                                                            "StateMachine":self.config["Ec2_Api_Record"]
+                                                       },
+                                                       role=db_role,
+                                                       tracing=lambda_.Tracing.ACTIVE)
+        api_dynamodb_lambda=lambda_.Function(
+                            self,
+                            "ApiDynamodbLambda",
+                            runtime=lambda_.Runtime.PYTHON_3_8,
+                            function_name='Api_Dynamodb_lambda',
+                            handler="lambda_function.lambda_handler",
+                            code=lambda_.Code.from_asset("lambda_code/api_dynamodb_lambda"),
+                            role=db_role,
+                            environment={"table_name":self.config["api_table_name"]},
+                            timeout=Duration.seconds(10),
+                            tracing=lambda_.Tracing.ACTIVE,
+                        )                                               
+        api_route53_lambda= lambda_.Function(
+                                    self,
+                                    "ApiRoute53Lambda",
+                                    function_name='api_Route53_lambda',
+                                    runtime=lambda_.Runtime.PYTHON_3_8,
+                                    handler="lambda_function.lambda_handler",
+                                    code=lambda_.Code.from_asset("lambda_code/api_route53_lambda"),
+                                    role=route_role,
+                                    timeout=Duration.seconds(10),
+                                    environment={
+                                                "hostedzone":self.config["hostedzone"],
+                                                "domain":self.config["domain"],
+                                                       },
+                                    tracing=lambda_.Tracing.ACTIVE,
+                                )
+
+        # Define the first Lambda function state
+        api_dynamodb_sf_task = tasks.LambdaInvoke(
+            self,
+            "APIDynamodbStepFunctionTask",
+            lambda_function=api_dynamodb_lambda
+        )
+        # Define the second Lambda function state
+        api_route53_sf_task = tasks.LambdaInvoke(
+            self,
+            "APIRoute53StepFunctionTask",
+            lambda_function=ap_route53_lambda
+        )
+
+        api_parallel_state = sfn.Parallel(
+            self, 'APIParallelState'
+        )
+
+        # add the tasks to the parallel state
+        api_parallel_state.branch(api_dynamodb_sf_task)
+        api_parallel_state.branch(api_route53_sf_task)
+        # Define the Step Functions state machine
+        api_step_fn = sfn.StateMachine(
+            self,
+            "APIStepFn",
+            timeout=Duration.minutes(5),
+            tracing_enabled=True,
+            state_machine_name=self.config["Ec2_Api_Record"],
+            state_machine_type=sfn.StateMachineType.STANDARD,
+            definition=parallel_state
+            )
+
+       
+        api1 = apigw.RestApi(
+            self,
+            "EC2API1",
+            rest_api_name=self.config["api1"]
+        )
+
+        api_execute_resource = api1.root.add_resource("A_Record")
+        api_execute_method = execute_resource.add_method(
+            "POST",
+            apigw.LambdaIntegration(api_execute_sf_lambda),
+            request_models={'application/json': apigw.Model.EMPTY_MODEL}
+        )
+
+
+
+        api_account_db = dynamodb.Table(
+            self, 'APIAccountDB',
+            partition_key=dynamodb.Attribute(
+                name='business_name',
+                type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            point_in_time_recovery=True,
+            table_name=self.config["api_table_name"],
+            removal_policy=RemovalPolicy.DESTROY,
+        )                
